@@ -1,0 +1,574 @@
+---
+title: "Handling Missing Data in Health Science Research"
+author: "Day 2 - Part I"
+date: '2022-06-23'
+output:
+  html_document:
+    default
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+urlcolor: blue
+---
+
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 5px; padding: 20px;}
+div.yellow { background-color:#fffde6; border-radius: 5px; padding: 20px;}
+div.green { background-color:#e6fff0; border-radius: 5px; padding: 20px;}
+div.orange { background-color:#ffede6; border-radius: 5px; padding: 20px;}
+div.purple { background-color:#f5e6ff; border-radius: 5px; padding: 20px;}
+div.aqua { background-color:#e6fdff; border-radius: 5px; padding: 20px;}
+</style>
+
+
+```{r setup, include=FALSE}
+library(here)
+library(tidyverse)
+library(tinytex)
+#library(PupillometryR)
+#library(emo)
+library(knitr)
+library(kableExtra)
+library(nlme)
+#library(car)
+#library(contrast)
+#library(AICcmodavg)
+#library(foreign)
+library(geepack)
+library(gee)
+library(MASS)
+library(lme4)
+library(glmm)
+library(mice)
+library(texreg)
+knitr::opts_knit$set(root.dir = here("dataset"))
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+theme_set(theme_bw(base_size = 15)) # Use black/white theme and increase font size for all ggplot figures
+```
+
+
+# Missing responses in longitudinal studies
+
+* Except in highly controlled settings, missing data in longitudinal studies are inevitable
+* What are the implications for missing data?
+  + Create complications for methods that require **balanced** data
+  + Reduce the **precision** with which changes in the mean response over time can be estimated
+  + Can introduce **bias** and lead to misleading inferences about changes in the mean response
+* Statistical methods to account for missing data in correlated (longitudinal) data is still a rapidly developing field
+* Usually, the missing data mechanism is not under the control of the investigators
+* We make **assumptions** about the missing data mechanism
+* Validity of the analysis depends on whether these assumptions hold
+* We need to be **explicit** about the assumptions made regarding the reasons for missing data
+
+
+## Example: Longitudinal outcomes in skin cancer study
+
+* In the previous session, we focused on the baseline data and skin cancer count after the first year 
+* In this session, we will analyze the full data including follow-up skin cancer status from year 1 through year 5
+* We will focus on the missing longitudinal **outcomes** rather than missing covariates
+* However, the implementation of Poisson data is not well developed in the joint modeling framework
+* Therefore, we will **dichotomize** the outcome to implement logistic regression
+  + If $Y_{\text{orig}} = 0$ then $Y_{\text{new}} = 0$ and if $Y_{\text{orig}} > 0$ then $Y_{\text{new}} = 1$
+  
+```{r}
+skin_data <- read.table("skin_data.txt", header = TRUE)
+skin_data[, c("center","skin","gender","treatment")] <- 
+  lapply(skin_data[, c("center","skin","gender","treatment")], factor)
+head(skin_data)
+
+skin_data <- skin_data %>% 
+  mutate(Y_bin = ifelse(Y == 0, 0, 1)) %>% 
+  dplyr::select(-Y)
+
+## plot the data
+skin_data %>%
+  group_by(treatment, year) %>%
+  summarise(pskin = mean(Y_bin)) %>%
+  ggplot(aes(y = pskin, x = year, color = treatment)) +
+  geom_point() + 
+  geom_line() + 
+  labs(y = "Percent skin cancer", x = "Year", color = "Treatment")
+```
+
+
+  
+  
+* We are interested in modeling the population-averaged inference of the change in risk of new skin cancer by treatment group
+
+$$
+\text{logit}(\mu_{ij})=\beta_{0} + \beta_{1}\text{Year}_{ij} + \beta_{2}\text{Year}^{2}_{ij} + \beta_{4}\text{Treatment}_{i} + \beta_{5}(\text{Year}_{ij} \times \text{Treatment}_{i})+ \beta_{6}(\text{Year}^{2}_{ij} \times \text{Treatment}_{i}) 
+$$
+
+
+
+## Missing data notation revisted
+
+Suppose we have $n$ repeated measurements of the same individual. Then, the $i$th subject's set of responses can be represented as a $n \times 1$ vector denoted by
+$$
+Y_{i} = (Y_{i1}, Y_{i2}, ..., Y_{in})^{T}.
+$$
+and the response vector $Y_{i}$ is coupled with a $n \times 1$ vector of **response indicators**
+$$
+R_{i} = (R_{i1}, R_{i2}, ..., R_{in})^{T},
+$$
+where $R_{ij} = 1$ if $Y_{ij}$ is observed and $R_{ij} = 0$ is $Y_{ij}$ is missing.
+
+Given $R_{i}$, we can **partition** $Y_{i} = (Y_{i1}, Y_{i2}, ..., Y_{in})^{T}$ into two components $Y_{i}^{O}$ and $Y_{i}^{M}$ where
+
+* $Y_{i}^{O}$ denotes the vector of **observed** responses for subject $i$
+* $Y_{i}^{M}$ denotes the vector of **missing** responses for subject $i$
+
+For example, 
+```{r, echo = FALSE}
+example <- data.frame(
+  id = c(1,2,3,4,5,6),
+  trt = c(0,0,0,1,1,1),
+  y0 = c(2.1, 2.7, 1.9, 3.4, 1.8, 4.0),
+  y1 = c(2.1+0.5, NA, 1.9+0.6, 3.4+0.1, 1.8+0.9, 4.0+0.2),
+  y2 = c(2.1+0.9, NA, 1.9+0.8, 3.4+0.3, NA, 4.0+0.6),
+  y3 = c(2.1+1.2, 2.9, NA, 3.4+0.5, NA, 4.0+1)
+)
+example
+```
+then,
+
+$$
+Y_{1} = 
+\left(\begin{array}{c} 
+2.1\\2.6\\3.0\\3.3
+\end{array}\right) 
+\quad
+R_{1} = 
+\left(\begin{array}{c} 
+1\\1\\1\\1
+\end{array}\right) 
+\quad
+Y^{O}_{1} = 
+\left(\begin{array}{c} 
+y_{11}\\y_{12}\\y_{13}\\y_{14}
+\end{array}\right) 
+\quad
+Y^{M}_{1} = 
+\left(\begin{array}{c} 
+\end{array}\right) 
+$$
+and
+$$
+Y_{2} = 
+\left(\begin{array}{c} 
+2.7\\.\\.\\2.9
+\end{array}\right) 
+\quad
+R_{2} = 
+\left(\begin{array}{c} 
+1\\0\\0\\1
+\end{array}\right) 
+\quad
+Y^{O}_{2} = 
+\left(\begin{array}{c} 
+y_{21}\\y_{24}
+\end{array}\right) 
+\quad
+Y^{M}_{2} = 
+\left(\begin{array}{c} 
+y_{22}\\y_{23}
+\end{array}\right) 
+$$
+
+
+
+## Missing data pattern
+
+Largely, two types of missing data pattern exist in longitudinal studies:
+
+<div class = "blue">
+<a>**Monotone missing data pattern** </a> <br>
+
+* Arises from **dropout** 
+* The term dropout refers to the special case where if $Y_{ik}$ is missing, then $Y_{ik+1},...,Y_{in}$ are also missing
+* Key question: Do individuals that dropout and those that remain in the study differ in any further relevant way?
+
+```{r, eval = FALSE}
+mice::md.pattern()
+```
+
+
+```{r, echo = FALSE}
+# change to wide format to use md.pattern() function from mice package
+skin_data %>% 
+  pivot_wider(names_from = year, 
+              names_prefix = "Y",
+              values_from = Y_bin) %>%
+  dplyr::select(starts_with("Y")) %>%
+  md.pattern()
+```
+</div>
+
+
+<div class = "yellow">
+* Monotone missing data pattern
+* 811 people have complete responses
+* 53 people dropped out after the first visit
+* 60 people dropped out after the second visit
+* 183 people dropped out after the third visit
+* 576 people dropped out after the fourth visit
+</div>
+
+
+<div class = "blue">
+<a>**Intermittent (non-monotone) missing data pattern** </a> <br>
+
+* Missing data pattern that is not monotone
+
+
+```{r, echo = FALSE}
+tlcmiss <- read.table("tlcmiss.txt", header = TRUE)
+tlcmiss %>% 
+  dplyr::select(-id, -trt) %>%
+  md.pattern()
+```
+</div>
+
+<div class = "yellow">
+* Non-monotone missing data pattern
+* 60 subjects have complete responses
+* 3 subjects have only the baseline response
+</div>
+
+
+
+
+## Approaches for missing data in longitudinal studies
+
+
+### Ignorable missingness (MCAR and MAR)
+
+* <a> **Complete-case analysis** </a>
+  - Restrict analysis to individuals with no missing data
+  - Valid if data are MCAR
+* <a> **Available data analysis** </a>
+  - Use all available data (include individuals with some missing data)
+  - Valid if data are  MCAR
+* <a> **Last value carried forward ** </a>
+  - Applies to monotone missing data
+  - Use last observed observation for subsequent missing observations
+  - Still popular despite many disadvantages
+  - Produces biased estimates and small standard errors
+* <a> **Maximum likelihood methods** </a>
+  - Maximum likelihood methods (linear mixed effects models, generalized linear mixed effects models) are valid if data are MCAR/MAR
+  - Requires the correct specification of the mean and variance model
+* <a> **Inverse probability weighting** </a>
+  - Weighting method that attempts to "even out" the contribution by individuals
+  - Appropriate for monotone missing data pattern
+  - Works well with marginal models (generalized estimating equations or GEE)
+  - Valid if data are MCAR/MAR
+* <a> **Multiple imputation** </a>
+  - Appropriate for monotone and intermittent missing patterns
+* Other methods include
+  - Combination of IPW and MI
+  - EM algorithm 
+  - Bayesian methods
+  - [Many R packages are available](https://cran.r-project.org/web/views/MissingData.html)
+
+
+## Inverse probability weighting
+
+### Overview
+
+* Basic idea is to estimate the probability of individuals remaining (or dropping out) in the study and weight each observation according to that probability
+  + Individuals with low probability of remaining in the study (high probability of dropping out) are given larger weights
+  + Individuals with high probability of remaining in the study (low probability of dropping out) are given smaller weights
+* IPW methods are more straightforward to implement with **monotone** missing data pattern
+* IPW methods are more appealing when a full likelihood-based analysis is not possible 
+  + i.e. marginal analysis with discrete responses
+  + IPW is often incorporated into **GEE**
+* Requires the correct specification of the dropout model ($\Pr(R_{ij}=1|R_{i1}=\cdots R_{i,j-1}, X_{i}, Y_{i1},...,Y_{i,j-1})$)
+
+<br>
+
+### IPW-GEE
+
+
+The IPW-GEE estimator is obtained as the solution to the following **weighted** estimating equations:
+
+$$
+\sum_{i=1}^{N}D_{i}^{T}V_{i}^{-1}W_{i}(Y_{i}-\mu)=0,
+$$
+where
+
+* $D_{i}$ is the $n \times p$ derivative matrix
+* $V_{i}$ is a $n \times n$ working covariance matrix for $Y_{i}$
+* $W_{i}$ is a $n \times n$ **diagonal** matrix of the occasion-specific weights, $w_{ij}$, for $j = 1,...,n$,
+$$
+W_{i}=
+\left(\begin{array}{cccc} 
+R_{i1}\times w_{i1} & 0 & ... & 0\\
+0 & R_{i2}\times w_{i2} & ... & 0\\
+\vdots & \vdots & \ddots & \vdots \\
+0 & 0 & ... & R_{in}\times w_{in}
+\end{array}\right)
+$$
+
+The weight, $w_{ij}$ is the inverse of the **unconditional** probability of being observed at the $j$th occasion.
+
+To calculate these weights, let $\pi_{ij}$ denote the **conditional** probability of the $i$th individual being observed (or not dropping out) at the $j$th occasion, given that this individual was observed at the prior occasions.
+
+For the first occasion we usually assume $R_{i1}=1$ for all individuals, and then $\pi_{i1}=1$.
+
+The MAR assumption implies that
+$$
+\pi_{ij}=\Pr(R_{ij}=1|R_{i1}= \cdots = R_{i,j-1}=1, Y_{i1}= \cdots = Y_{i,j-1}, X_{i}).
+$$
+
+The **unconditional** probability of being observed at the $j$th occasion can be expressed as the **cumulative product** of the **conditional** probabilities,
+$$
+\pi_{i1} \times \pi_{i2} \times \cdots \times \pi_{ij}.
+$$
+The required weight is then given by the **inverse** of the cumulative product of conditional probabilities,
+$$
+w_{ij} = (\pi_{i1} \times \pi_{i2} \times \cdots \times \pi_{ij})^{-1}.
+$$
+
+<br>
+
+### Estimation of weights
+
+We can estimate $\pi_{ij}$ by constructing a logistic regression model for $\pi_{ij}$:
+
+$$
+\begin{aligned}
+\text{logit}(\pi_{ij}) &= \text{logit}\left\{\Pr(R_{ij}=1|R_{i1}=\cdots=R_{i,j-1}=1,Z_{ij})\right\}\\
+&= Z_{ij}^{T}\theta
+\end{aligned}
+$$
+where $Z_{ij}$ is a $q \times 1$ design vector that incorporates:
+
+* certain components of $X_{ij}$ 
+* past responses ($Y_{i1},...,Y_{i,j-1}$)
+* possibly additional covariates that may be predictive of dropout but are not of subject-matter interest in the marginal model for the mean response
+
+<br>
+
+### Assumptions
+
+* The missing data mechanism depends only on **variables fully observed** in the sample 
+* The probability of being observed ($\pi_{ij}$) is **positive** (not close to zero)
+  + If $\pi_{ij}$ is very small, $w_{ij}$ will be extremely large
+  + Extremely large weights on small subset of observations may yield regression parameter estimates that are unstable and have poor precision
+* Safest to assume working **independence** correlation
+  + Need robust standard errors using the sandwich variance estimator
+
+
+### Detailed approach with data from Clinical trial of contracepting women
+
+We are interested in modeling the population-averaged inference of the change in risk of new skin cancer by treatment group
+
+$$
+\text{logit}(\mu_{ij})=\beta_{0} + \beta_{1}\text{Year}_{ij} + \beta_{2}\text{Year}^{2}_{ij} + \beta_{4}\text{Treatment}_{i} + \beta_{5}(\text{Year}_{ij} \times \text{Treatment}_{i})+ \beta_{6}(\text{Year}^{2}_{ij} \times \text{Treatment}_{i}) 
+$$
+
+* Because we are interested in modeling the marginal probability of a **discrete** (or more specifically, binary) outcome, we cannot employ ML methods
+* We need to fit a marginal model using GEE
+  - Estimates will be biased if data are MAR
+* Incorporate IPW
+
+<br>
+
+### Model for dropout process
+
+* First, we will fit a model for the dropout process
+* The outcome is $\text{logit}(\pi_{ij}) = \text{logit}\left\{\Pr(R_{ij}=1)\right\}$
+  + Although it is called the "dropout model", we are modeling the probability of **not** dropping out
+  + We don't include baseline data (everybody is observed)
+* The predictors include fully observed covariates and previously observed responses
+$$
+\begin{aligned}
+\text{logit}(\pi_{ij})&=\theta_{1}+\theta_{2}I(t=3)+\theta_{3}I(t=4)+\theta_{4}I(t=5)+\theta_{5}\text{age}_{i}+\theta_{6}\text{skin}_{i}+\theta_{7}\text{treatment}_{i}\\
+&+\theta_{8}\text{gender}_{i}+\theta_{9}\text{exposure}_{i}+\theta_{10}Y_{i,j-1}+\theta_{11}(\text{treatment}_{i}\times Y_{i,j-1}), \quad j = 2,3,4,5
+\end{aligned}
+$$
+where $\pi_{ij}=\Pr(R_{ij}=1|R_{i1}= \cdots = R_{i,j-1}=1, Y_{i,j-1}, \text{Dose}_{i})$.
+```{r}
+# change to wide format first to fill in missing years with NA
+skin_wide <- skin_data %>% 
+  pivot_wider(names_from = year, 
+              names_prefix = "Y",
+              values_from = Y_bin)
+head(skin_wide)
+
+skin_long <- skin_wide %>%
+  pivot_longer(cols = starts_with("Y"), 
+               values_to = "Y", 
+               names_to = "Year",
+               names_prefix = "Y") %>%
+  mutate(Year = as.numeric(as.factor(Year)),
+         Year2 = Year^2,
+          ## ‘*’ not meaningful for factors
+         trtYear = as.numeric(as.character(treatment)) * Year,
+         trtYear2 = as.numeric(as.character(treatment)) * Year2) 
+head(skin_long)
+
+ipwdat <- skin_long %>%
+  group_by(ID) %>%
+  mutate(prevy = dplyr::lag(Y)) %>%
+  ungroup() %>%
+  mutate(r = ifelse(is.na(Y), 0, 1),
+         t2 = ifelse(Year == 2, 1, 0),
+         t3 = ifelse(Year == 3, 1, 0),
+         t4 = ifelse(Year == 4, 1, 0),
+         t5 = ifelse(Year == 5, 1, 0),
+         trt.prevy =  as.numeric(as.character(treatment)) * as.numeric(as.character(prevy))) %>%
+  filter(!is.na(Y)|!is.na(prevy))  
+head(ipwdat)
+
+# fit drop-out model
+rmod <- glm(r ~ t3 + t4 + t5 + age + skin + treatment + gender + exposure + prevy + trt.prevy, 
+            data = ipwdat, family = binomial("logit"))
+round(summary(rmod)$coef,2)
+```
+
+### Compute IPW
+
+* First, compute the predicted $\text{logit}(\hat\pi_{ij})$ from the dropout model
+* Then, compute the predicted $\hat\pi_{ij}$
+* Because the first response was fully observed, with $R_{ij}=1$ for all individuals, $\hat\pi_{i1} = 1$ by definition
+
+$$
+\hat\pi_{ij} = \frac{\text{exp}(Z_{ij}^{T}\hat\theta)}{1+\text{exp}(Z_{ij}^{T}\hat\theta)}
+$$
+```{r}
+dropcoef <- summary(rmod)$coef[,1]
+## create the dataset for prediction the weight
+xmat <- model.matrix(~ t3 + t4 + t5 + age + skin + treatment + gender + exposure + prevy + trt.prevy,
+                     model.frame(~., data = ipwdat, na.action = na.pass)) 
+head(xmat)
+
+ipwdat <- ipwdat %>%
+          mutate(logitp = as.numeric(xmat %*% dropcoef), 
+                 phat = ifelse(Year == 1, 1, exp(logitp)/(1 + exp(logitp)))) %>%
+          group_by(ID) %>%
+          mutate(cumprob = cumprod(phat),
+          ipw = 1/cumprob) %>%
+          ungroup()
+          
+ipwdat %>%
+  filter(ID %in% c(100034, 100067, 103059, 416964)) %>%
+  dplyr::select(ID, treatment, Year, Y, prevy, r, logitp, phat, cumprob, ipw) %>%
+  print()
+```
+
+* Prior to conducting an IPW-GEE analysis, we should examine the **distribution** of the estimated weights for any presence of discernibly large weights
+
+```{r}
+# examine the weights by time point
+ipwdat %>%
+    filter(r == 1) %>%
+    ggplot(aes(y = ipw, x = as.factor(Year))) +
+    geom_boxplot() +
+    labs(y = "IPW", x = "Year")
+```
+<div class = "yellow">
+`r text_spec("Observations", color = "brown", bold = T)`
+
+* $\hat w_{i1}=1$ for all individuals, as should be
+* Estimated weights are increasing over time
+* Estimated weights range from 1.0 to 3.1 $\rightarrow$ no concern that a small subset of the observations might have undue influence on the analysis
+
+
+</div>
+
+
+### Model for response with IPW
+
+Finally, we will fit a logistic regression model for the marginal probability of developing skin cancer:
+
+* Use `wights=` option in `geeglm`
+* To ensure that the weights are appropriately incorporated, we need to make the **"working independence"** assumption for the within-subject association among the responses
+* Because a "working independence" assumption is made, standard errors are based on the **sandwich variance** estimator
+  + Default for `geeglm`
+
+```{r}
+# ipw-gee
+ipwgee <- geeglm(Y ~ Year + Year2 + trtYear + trtYear2, 
+                 family=binomial("logit"),
+                 id = ID, scale.fix = TRUE,
+                 corstr = "independence",
+                 weights = ipw,
+                 data = ipwdat)
+summary(ipwgee)
+```
+
+<br>
+
+* We will compare **four** different analyses
+  + Complete-case analysis 
+  + Available data analysis
+  + Last observation carried forward
+  + IPW
+
+
+```{r}
+# complete cases (remove all subjects who dropout)
+ccdat <- skin_long %>%
+  group_by(ID) %>%
+  mutate(dropout = ifelse(is.na(mean(Y)), 1, 0)) %>%
+  ungroup() %>%
+  filter(dropout == 0) 
+
+ccgee <- geeglm(Y ~ Year + Year2 + trtYear + trtYear2, 
+         family = binomial("logit"),
+         id = ID, scale.fix = TRUE,
+         corstr = "unstructured",
+         data = ccdat)
+
+
+# available data 
+avdat <- skin_long %>%
+  drop_na()
+avgee <- geeglm(Y ~ Year + Year2 + trtYear + trtYear2, 
+                family = binomial("logit"),
+                id = ID, scale.fix = TRUE,
+                corstr = "unstructured",
+                data = avdat)
+
+
+# last value carried forward
+lvcfdat <- skin_long %>%
+  group_by(ID) %>%
+  fill(Y) %>%
+  ungroup()
+lvcfgee <- geeglm(Y ~ Year + Year2 + trtYear + trtYear2, 
+                  family = binomial("logit"),
+                  id = ID, scale.fix = TRUE,
+                  corstr = "unstructured",
+                  data = lvcfdat)
+
+```
+
+
+```{r, echo = FALSE}
+combine_ests <- function(modout){
+  ests <- sprintf('%.3f', coef(summary(modout))[2:5,1])
+  ses <- paste0(ests, " (", sprintf('%.3f', coef(summary(modout))[2:5,2]),")")
+  return(ses)
+}
+cc.out <- combine_ests(ccgee)
+av.out <- combine_ests(avgee)
+lvcf.out <- combine_ests(lvcfgee)
+ipw.out <- combine_ests(ipwgee)
+variable <- c("Year", "Year^2", "Year x Trt", "Year^2 x Trt")
+as.data.frame(cbind(variable, cc.out, av.out, lvcf.out, ipw.out)) %>% 
+  kbl(col.names = c("Variable", "Complete-case", "Available data", "Last value carried fwd", "IPW"), caption = "Estimated regression coefficients (standard errors) from logistic regression analysis", align = "c") %>% 
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+### Summary
+
+* IPW is useful if only the response variables are missing due to dropout
+* IPW requires correct specification of the dropout model for valid estimation of $\beta$
+* In the presence of discernibly large weights, 
+  + Check the sensitivity of results to the inclusion of observations that receive large weights
+  + If the analysis results are sensitive to a small number of large weights, then
+    - apply weight truncation
+    - or consider an alternative methods of adjusting for missingness 

@@ -1,0 +1,291 @@
+---
+title: "Handling Missing Data in Health Science Research"
+author: "Day 2 - Part II"
+date: '2022-06-23'
+output:
+  html_document:
+    default
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+urlcolor: blue
+---
+
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 5px; padding: 20px;}
+div.yellow { background-color:#fffde6; border-radius: 5px; padding: 20px;}
+div.green { background-color:#e6fff0; border-radius: 5px; padding: 20px;}
+div.orange { background-color:#ffede6; border-radius: 5px; padding: 20px;}
+div.purple { background-color:#f5e6ff; border-radius: 5px; padding: 20px;}
+div.aqua { background-color:#e6fdff; border-radius: 5px; padding: 20px;}
+</style>
+
+
+```{r setup, include=FALSE}
+library(here)
+library(tidyverse)
+library(tinytex)
+#library(PupillometryR)
+#library(emo)
+library(knitr)
+library(kableExtra)
+library(nlme)
+#library(car)
+#library(contrast)
+#library(AICcmodavg)
+#library(foreign)
+library(geepack)
+library(gee)
+library(MASS)
+library(lme4)
+library(glmm)
+library(mice)
+library(texreg)
+library(mitml)
+library(jomo)
+library(mitools)
+knitr::opts_knit$set(root.dir = here("dataset"))
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+theme_set(theme_bw(base_size = 15)) # Use black/white theme and increase font size for all ggplot figures
+```
+
+# MI for longitudinal data
+
+* In the IPW example, all the covariates were fully observed
+* However, what if some of the covariates were also missing?
+* MI can handle situations where the longitudinal outcomes and subject-level covariates are both missing
+* We will use `skinl_MAR.txt` where we simulated `age` and `skin` to have missing values 
+```{r}
+skin_long <- read.table("skinl_mar.txt", header = TRUE)
+skin_long[, c("center","skin","gender","treatment","Y")] <- 
+  lapply(skin_long[, c("center","skin","gender","treatment","Y")], factor)
+head(skin_long)
+```
+
+
+* To make the example a little more applicable (and simpler), we will consider a different analysis model for the MI method
+$$
+\text{logit}(\mu_{ij})=\beta_0+\beta_1 \text{age}_i+\beta_2 \text{skin}_i+\beta_3 \text{exposure}_i + \beta_4 \text{treatment}_i +\beta_5 \text{Year}_{ij}+\beta_5 \text{Year}^2_{ij}, \quad j=2,3,4,5
+$$
+where $\mu_{ij} = \Pr(Y_{ij}=1)$ is the probability of developing skin cancer for the $i$th subject in $j$th year
+* Note that in addition to the outcomes, some of the predictors (age, skin) are also missing
+* Mice and jomo are able to handle MI for multilevel data 
+
+  + Level 1 variables do not repeat within a subject (cluster)
+  + Y is a "level 1" variable
+  
+  + Level 2 variables repeat within a subject (cluster)
+   + Age and skin are "level 2" variables
+   
+
+
+## Visualization
+```{r}
+# need data to be in wide format
+skin_wide <- skin_long %>% 
+  pivot_wider(names_from = year, 
+              names_prefix = "Year",
+              values_from = Y)
+# heatmap
+naniar::vis_miss(skin_wide)
+
+# aggregation plot
+VIM::aggr(skin_wide, numbers = TRUE, prop = c(TRUE, FALSE))
+```
+
+
+
+## Multilevel imputation
+<!-- Mice also provides functions for imputing multilevel data, such as 2l.norm for level-1 norm heteroscedastic, 2lonlypmm for level 2 class predictive mean matching et al.  -->
+
+### Mice
+* We will first try imputation without treating the data as multilevel data
+* We will use logistic regression to predict the binary outcome $Y$
+
+```{r}
+skin_long$year2 <- skin_long$year**2
+head(skin_long)
+
+start.time <- Sys.time()
+mice.multi.out1 <- mice(skin_long, seed = 1, m = 5, 
+                        method = c("", "", "norm", "logreg", "", "", "", "", "logreg", ""),
+                        print = F)
+end.time <- Sys.time()
+end.time - start.time
+
+complete.data.multi1 <- complete(mice.multi.out1, "all")
+
+## check the first imputed dataset
+head(complete.data.multi1$`1`, 20)
+```
+* Note that when you treat all observations as independent, the imputed values for `age` for ID = 100034 are all different at each year
+
+```{r}
+## geeglm() requires numeric (0/1) rather than factor for binary data
+## we first use as.numeric(as.character()) to transfer data into 0/1
+fit.multi1 <- with(mice.multi.out1, 
+                   model1 <- geeglm(as.numeric(as.character(Y)) ~ age + skin + 
+                                      treatment + gender + exposure + year + year2, 
+                                    id = ID, scale.fix = TRUE,
+                                    corstr = "ar1",
+                                    family = binomial("logit")))
+
+testEstimates(as.mitml.result(fit.multi1))
+```
+
+* Now we will perform MI by treating the data as multilevel data
+* We still use logistic regression for outcome Y
+* A useful feature of the `mice()` function is the ability to specify the set of predictors to be used for each incomplete variable
+* The basic specification is made through the `predictorMatrix` argument, which is a square matrix of size `ncol(data)` containing 0/1 data
+* Each row in `predictorMatrix` identifies which predictors are to be used for the variable in the row name. 
+```{r}
+pred <- mice.multi.out1$predictorMatrix
+pred
+```
+* For example, age is predicted from center, skin, gender, exposure, treatment, year and Y
+* gender does not have missing value, so gender will not be imputed
+* For two-level imputation models, other numeric codes are allowed
+
+
+Allowed entries in predictorMatrix:
+
+Setting  Description
+-------  -----------------------------------------------------------------------------------------------
+-2       class variable (only one is allowed, must be indicated when you perform multilevel imputation)
+0        variable is not included in the imputation model
+1        variable is included as a fixed effect
+2        variable is included as a random effect
+3        variable is included as a fixed effect and group mean
+4        variable is included as a random effect and group mean
+
+The above information is obtained from help(mice.impute.2l.pan) and https://bookdown.org/mwheymans/bookmi/multiple-imputation-models-for-multilevel-data.html#the-predictormatrix
+
+```{r}
+## change the code to specify our own imputation model
+## you have to specify class variables when using multilevel imputation
+pred[c("age", "skin", "Y"), "ID"] <- -2
+pred
+
+## convert the factor of skin into numeric to avoid NA when using PMM
+## 2lonly is for imputing level-2 variable, 2l is for imputing level-1 variable
+skin_long2 <- skin_long %>% 
+  mutate(skin = as.numeric(as.character(skin)))
+start.time <- Sys.time()
+mice.out  <- mice(skin_long2, seed = 100, m = 5, 
+                  method = c("", "", "2lonly.norm", "2lonly.pmm","","","","","2l.bin", ""),
+                  predictorMatrix = pred, print = F, maxit = 5)
+end.time <- Sys.time()
+end.time - start.time
+
+## The warning results from the linear dependencies among the predictors. 
+## The mice() function checks for linear dependencies during the iterations, 
+## and temporarily removes predictors from the univariate imputation models where needed.
+
+complete.data.multi2 <- complete(mice.out, "all")
+
+##check the first imputed dataset
+head(complete.data.multi2$`1`)
+
+## fit analysis model and pool results
+fit.multi2 <- with(mice.out, 
+                   model1 <- geeglm(as.numeric(as.character(Y)) ~ age + skin +
+                                      treatment + gender + exposure + year + year2, 
+                                    id = ID, scale.fix = TRUE,
+                                    corstr = "ar1",
+                                    family = binomial("logit")))
+testEstimates(as.mitml.result(fit.multi2))
+```
+<div class = "green">
+<a>**A note about FCS mulilevel imputation** </a><br>
+
+MICE provides limited choice for imputing multilevel data and it could also be very time consuming when iteration times is large. Recently a new software called Blimp has been developed for imputing multilevel data using FCS (https://pubmed.ncbi.nlm.nih.gov/28557466/). It provides different options for imputing continuous variables, categorical variables (including nominal and ordinal).  
+</div>
+
+```{r echo=F}
+##Mice does not provide function for imputing poisson count data. Instead, this could be done using R package countmd and countimp.
+###use the micemd package 
+# micemd.out <- mice.par(data_MAR_long, m=5, method = c("","","norm","logreg","","","","","2l.glm.pois"), predictorMatrix = pred)
+# head(micemd.out$imp$Y)
+# fit.micemd <- with(micemd.out, model1 <- geeglm(Y~treatment+gender+exposure+skin+Year, id=ID, family=poisson()))
+# summary(fit.micemd)
+
+##also try countimp
+## more details could be found from https://www.kkleinke.de/countimp/
+#countimp.out <- countimp(data_MAR_long, method=c("","","norm","logreg","","","","","poisson"), predictorMatrix = pred)
+```
+
+
+### Joint Modeling 
+
+* We will now use the R package jomo to perform joint modeling (JM)
+* This package can impute multilevel  data
+* When imputing the multilevel data using jomo, we need to distinguish between Y and Y2, X and X2
+  + Y is for level-1 missing data
+  + Y2 is for level-2 missing data
+  + X is for level-1 complete data 
+  + X2 is for level-2 complete data
+
+
+```{r echo=TRUE, results='hide'}
+## be careful about the column names of each dataframe
+## jomo will inherit from those column names
+Y.jomo.l1miss <- data.frame(Y = skin_long[,c("Y")])
+Y.jomo.l2miss <- data.frame(skin_long[,c("age", "skin")])
+
+X.jomo.l1complete <- data.frame(skin_long[,c("year", "year2")])
+X.jomo.l2complete <- data.frame(skin_long[,c("gender", "exposure", "treatment")])
+## removing this will change the result
+X.jomo.l2complete$const <- 1
+
+set.seed(100)
+start.time <- Sys.time()
+jomo.multi.out <- jomo(Y = Y.jomo.l1miss, Y2 = Y.jomo.l2miss, 
+                       X = X.jomo.l1complete, X2 = X.jomo.l2complete, 
+                       clus = skin_long$ID, nburn = 1000, nbetween = 1000, nimp = 5)
+end.time <- Sys.time()
+end.time - start.time
+```
+
+```{r}
+head(jomo.multi.out[which(jomo.multi.out$Imputation == 1),])
+
+## use imputationList from mitools() to split the imputed dataset
+imp.list.jomo.multi <- imputationList(split(jomo.multi.out, jomo.multi.out$Imputation)[-1])
+
+## fit the analysis model
+fit.jomo.multi <- with(imp.list.jomo.multi,
+                       model1 <- geeglm(as.numeric(as.character(Y)) ~ age + skin + 
+                                          treatment + gender + exposure + year + year2,
+                                        id = clus, scale.fix = TRUE,
+                                        corstr = "ar1",
+                                        family = binomial("logit")))
+
+## pool the results
+testEstimates(as.mitml.result(fit.jomo.multi))
+```
+
+<div class = "green">
+<a>**A note about imputing Poisson data** </a><br>
+The implementation of Poisson data is not well developed in the joint modeling framework. However, count variables can be treated as categorical variables or continuous variables, suggested by Quartagno et al. (Multiple imputation for discrete data: Evaluation of the joint latent normal model). The former is only viable when the mean of the underlying Poisson distribution is low. It is generally thought that Poisson distributions with mean > 20 can be well approximated by the normal distribution. In this case variance-stabilizing square-root transformation or log transformation can be used.
+</div>
+
+
+# Methods for data MNAR
+- Identify additional data to make the data more "MAR"
+- Perform sensitivity analysis: explore the results of the analysis under alternative scenarios for missing data (simulation studies)
+- If the above has been investigated, we can use nonignorable imputation model, which models the distribution $\Pr(Y,R)$ instead of $P(Y)$ ($R$ is the missing indicator)
+  1. selection model: $\Pr(Y,R)=\Pr(Y)\Pr(R|Y)$
+  2. pattern-mixture model: $\Pr(Y,R)=\Pr(Y|R)\Pr(R)=\Pr(Y|R=1)\Pr(R=1)+\Pr(Y|R=0)\Pr(R=0)$
+- R packages developed for data MNAR 
+  + [missingHE](https://cran.r-project.org/web/packages/missingHE/vignettes/Fitting_MNAR_models_in_missingHE.html)
+  + [miceMANR](https://github.com/cran/miceMNAR) with [paper](https://bmcmedresmethodol.biomedcentral.com/articles/10.1186/s12874-018-0547-1)
+
+# Considerations for fairness in missing data imputation
+- MI is a powerful tool that can reduce bias and improve efficiency when data is MCAR/MAR
+- However, the results from MI is "only as good as" the data that we provide in the imputation model
+- For example, if we have extremely few observations from a certain subgroup, then we have less information on this subgroup even if the rate of missingness is the same across all subgroups
+- Imbalance of missingness could also affect imputation fairness, e.g., more missingness one group has, the larger the imputation error
+- Imputation fairness is associated with missing rate
+- Use imputed data for prediction: trade-off between fairness and prediction performance
+  + simulation studies have shown that increasing fairness in imputation doesn’t lead to more accurate predictions but the opposite results are commonly observed

@@ -1,0 +1,409 @@
+---
+title: "Handling Missing Data in Health Science Research"
+author: "Day 1 - Part I"
+date: '2022-06-21'
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+  html_document:
+    default
+urlcolor: blue
+---
+
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 5px; padding: 20px;}
+div.yellow { background-color:#fffde6; border-radius: 5px; padding: 20px;}
+div.green { background-color:#e6fff0; border-radius: 5px; padding: 20px;}
+div.orange { background-color:#ffede6; border-radius: 5px; padding: 20px;}
+div.purple { background-color:#f5e6ff; border-radius: 5px; padding: 20px;}
+div.aqua { background-color:#e6fdff; border-radius: 5px; padding: 20px;}
+</style>
+
+
+```{r setup, include=FALSE}
+library(here)
+library(tidyverse)
+library(tinytex)
+#library(PupillometryR)
+#library(emo)
+library(knitr)
+library(kableExtra)
+library(nlme)
+#library(car)
+#library(contrast)
+#library(AICcmodavg)
+#library(foreign)
+library(geepack)
+library(gee)
+library(MASS)
+library(lme4)
+library(glmm)
+library(mice)
+library(jtools)
+library(huxtable)
+knitr::opts_knit$set(root.dir = here("dataset"))
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+theme_set(theme_bw(base_size = 15)) # Use black/white theme and increase font size for all ggplot figures
+```
+
+
+# About this workshop
+
+## Instructor
+Aya Mitani, PhD, MPH<br/>
+Assistant Professor<br/>
+Division of Biostatistics<br/>
+Dalla Lana School of Public Health<br/>
+[Website](https://www.ayamitani.com/)
+
+## Student Assistant
+Mei Dong, MSc<br/>
+PhD student in Biostatistics<br/>
+Dalla Lana School of Public Health<br/>
+[Website](https://meidongstat.github.io/)
+
+## Overview
+
+### Day I (2022 June 21 1-3p) 
+- Introduction 
+  + Missing data in health research
+  + Missing data type 
+  + Missing data mechanism 
+- Understanding missingness in data 
+  + Visual inspection 
+  + Can it be ignored?
+- Missing data in cross-sectional data 
+  + Single-level multiple imputation (MI)
+  + MI of interaction variables  
+
+### Day II (2022 June 23 1-3p) 
+- Missing data in longitudinal data 
+  + IPW for drop-out in longitudinal data 
+  + Multiple imputation for multilevel data 
+- Methods for nonignorable missing data 
+- Consideration for fairness in missing data imputation 
+
+## Housekeeping
+- The workshop will **not** be recorded
+- We will have a **10-minute break** in the middle of each session
+- Ask questions! 
+  + Feel free to interrupt me by **raising your hand**
+  + Put questions in the **chat** (Mei will field most of the questions)
+  + Wait until the **end of each session** (I will stick around for a few minutes after 3p)
+
+# Missing data in health research
+
+- It is **very** common for sets of quantitative data to be incomplete
+  + i.e. Not all **planned** observations are actually made
+- This is especially true when studies are conducted on **human** subjects, e.g.,
+  + Epidemiologic studies 
+  + Clinical trials 
+  + Sample surveys 
+- Missing data can lead to **bias** and **lack of precision** in the analyses
+- The default method is complete-case analysis or listwise deletion
+  + Observations with at least one variable missing is deleted from the analysis
+  
+```{r, echo=FALSE, out.width = '60%', fig.align="center"}
+knitr::include_graphics(here("notes", "image", "samplebias.png"), error = FALSE)
+```
+
+
+## Reasons for missing data 
+
+- Item nonresponse
+  + Respondent skips a question because they don't want to provide an answer
+- Unit nonresponse
+  + Refusal to complete the survey (see above cartoon)
+- Data entry or coding error
+  + Frequently occurs in administrative data
+- Loss to follow-up
+  + Informative or non-informative censoring
+- By design 
+  + Bad survey design (unintentional)
+  + Sampling (intentional)
+- Many more
+
+> Obviously the best way to treat missing data is not to have them. <br/>
+[Orchard and Woodbury (1972, p.697)]
+
+
+## Be explicit about missing data
+
+- Researchers tend to downplay the issue of missing data
+- Best practices when dealing with missing data
+  + The presence of missing data should be explicitly stated in the text
+  + If using default methods (listwise deletion or complete-case analysis), then mention it
+  + Make sure all your tables have the same sample sizes
+  + Use model-based missing data methods
+- Not being explicit about missing data negatively affects the **reproducibility**, **replicability**, and **reliability** of your research
+
+
+# Example data: The Skin Cancer Prevention Study
+
+The data are from a randomized, double-blind, placebo-controlled clinical trial of beta-carotene to prevent non-melanoma skin cancer in high risk subjects. Subjects were randomized to either receive placebo or 50mg of beta-carotene per day for 5 years. Subjects were examined once a year and biopsied if a cancer was suspected to determine the number of new skin cancers occurring since the last exam. The outcome variable is a count of the number of new skin cancers per year. The dataset contains 1683 observations. (https://pubmed.ncbi.nlm.nih.gov/2666024/)
+
+Variable    Category          Explanation    
+--------   -------------      --------------- 
+`ID`          categorical       ID of participant    
+`center`      categorical       study center (1-4)
+`age`         numeric           age (in years) at baseline
+`skin`        binary            skin type, 1=burns, 0=otherwise
+`gender`      categorical       1=male, 0=female
+`exposure`    count             number of previous skin cancers
+`treatment`   categorical       1=beta-carotene, 0=placebo
+`year`        numeric           year of follow-up
+`Y`           count             number of new skin cancers per year
+
+```{r}
+skin <- read.table("skin_data.txt", header = TRUE)
+head(skin, 10)
+tail(skin, 10)
+```
+
+
+# Missing data in cross-sectional data
+
+## Notation
+
+- $\boldsymbol{Y}$ is the $n\times p$ matrix containing the data values on $p$ variables for $n$ people
+- $\boldsymbol{R}$ is the $n\times p$ matrix containing the response indicator ($0$ or $1$)
+  + If $Y_{ij}$ is observed then $R_{ij}=1$ 
+  + If $Y_{ij}$ is not observed then $R_{ij}=0$ 
+  
+<br/>
+For example, if we have a data set containing 5 people and 4 variables that look like
+```{r, echo = FALSE}
+id <- 1:5
+v1 <- c(50, 65, 48, 45, 51)
+v2 <- rbinom(5, 1, 0.5)
+v3 <- c(5, NA, NA, 9, 2)
+v4 <- c(1, 0, NA, 1, NA)
+example <- as.data.frame(cbind(id, v1, v2, v3, v4))
+example
+```
+Then,
+$$
+\boldsymbol{Y} = 
+\left(\begin{array}{cccc} 
+50 & 0 & 5 & 1\\
+65 & 1 & . & 0\\
+48 & 0 & . & .\\
+45 & 1 & 9 & 1\\
+51 & 1 & 2 & .
+\end{array}\right) 
+\qquad \qquad
+\boldsymbol{R} = 
+\left(\begin{array}{cccc} 
+1 & 1 & 1 & 1\\
+1 & 1 & 0 & 1\\
+1 & 1 & 0 & 0\\
+1 & 1 & 1 & 1\\
+1 & 1 & 1 & 0
+\end{array}\right) 
+$$
+
++ Further $\boldsymbol{Y}=(\boldsymbol{Y}_{\text{obs}}, \boldsymbol{Y}_{\text{mis}})$ contain the hypothetically complete data, where
+  - $\boldsymbol{Y}_{\text{obs}}$ is the set of observed data
+  - $\boldsymbol{Y}_{\text{mis}}$ has real values, but the values themselves are masked from us
+  - Missingness indicators hid the true values that are **meaningful for analysis**
+  
+## Missing data mechanism
+
++ A hierarchy of **three** different types of missing data mechanisms can be distinguished by considering how $\boldsymbol{R}$ is related to $\boldsymbol{Y}=(\boldsymbol{Y}_{\text{obs}}, \boldsymbol{Y}_{\text{mis}})$
+<!-- + The relationship between $\boldsymbol{R}$ and $\boldsymbol{Y}$ is described by the *missing data model*  -->
+
+<div class = "blue">
+<a>**Missing completely at random (MCAR)** </a> <br>
+
+* Probability that responses are missing does not depend on $\boldsymbol{Y}_{\text{obs}}$ or $\boldsymbol{Y}_{\text{mis}}$
+* $\Pr(R=0|Y_{\text{obs}}, Y_{\text{mis}}) = \Pr(R=0)$
+* The observed values can be thought of as a **random sample** of the full data
+
+<br>
+
+<a>**Missing at random (MAR)** </a> <br>
+
+* Probability that responses are missing may depend on observed information, $\boldsymbol{Y}_{\text{obs}}$
+* $\Pr(R=0|Y_{\text{obs}}, Y_{\text{mis}}) = \Pr(R=0|Y_{\text{obs}})$
+
+<br>
+
+<a>**Missing not at random (MNAR)** </a> <br>
+
+* Probability that responses are missing depends on the set of observed information, $\boldsymbol{Y}_{\text{obs}}$, and the values that should have been obtained, $\boldsymbol{Y}_{\text{mis}}$
+* $\Pr(R=0|Y_{\text{obs}}, Y_{\text{mis}})$ does not simplify
+
+
+```{r, echo=FALSE, out.width = '60%', fig.align="center"}
+knitr::include_graphics(here("notes", "image","mnarimage.jpg"), error = FALSE)
+```
+
+<br>
+
+* MCAR and MAR are often referred to as **ignorable** mechanisms
+* MNAR is referred to as **nonignorable** mechanism
+<!-- * For **likelihood-based inference**, the crucial distinction is between MCAR/MAR and MNAR -->
+<!--   - i.e. for likelihood-based methods, valid inferences can still be obtained even if data are MAR -->
+* Several tests exist to distinguish between MCAR and MAR, but they are not widely used and their practical value is unclear 
+  + [Enders (2010, p. 17-21)](https://www.guilford.com/books/Applied-Missing-Data-Analysis/Craig-Enders/9781606236390) evaluates two procedures 
+  * It is not possible to test MAR versus MNAR because the information that is needed for such a test is missing!
+
+
+
+## Year 1 data of skin cancer study
+```{r}
+skinbl <- read.table("skin_FULL.txt", header = TRUE)
+head(skinbl, 10)
+tail(skinbl, 10)
+```
+
+* For this workshop, we generated **three** different cross-sectional data sets 
+* The variables `age` and `skin` were simulated to be MCAR, MAR, and MNAR for each data set
+
+Missing data mechanism    Description          
+--------                 -------------      
+Full                      No missing data, all data are observed
+MCAR                      `age` or `skin` is missing completely at random for some individuals
+MAR                       Missingness of `age` and `skin` are related to all other covariates,\linebreak 
+                          but not with the outcome $Y$ 
+MNAR                      `age` is missing for all individuals with true age > 55 years \linebreak 
+                          `skin` is missing in 20% of individuals with true skin = 0
+
+
+```{r, echo=FALSE}
+skin_mar <- read.table(here("dataset", "skinb_MAR.txt"), header = TRUE)
+skin_mnar <- read.table(here("dataset", "skinb_MNAR.txt"), header = TRUE)
+skin_mcar <- read.table(here("dataset", "skinb_MCAR.txt"), header = TRUE)
+```
+
+## Missing data visualization
+
+* Many packages in R are available to describe the prevalence and pattern of missing data
+* We will go over three packages
+```{r, eval = FALSE}
+library(naniar)
+library(VIM)
+library(finalfit)
+```
+
+
+### Heatplot of missingness across the entire data frame  
+
+```{r}
+naniar::vis_miss(skin_mcar)
+naniar::vis_miss(skin_mar)
+naniar::vis_miss(skin_mnar)
+```
+
+### Lollipop plot of percentage of missingness for each variable
+
+```{r}
+naniar::gg_miss_var(skin_mar, show_pct = TRUE)
+
+# Stratified by treatment
+naniar::gg_miss_var(skin_mar, show_pct = TRUE, facet = treatment)
+
+# Stratified by gender
+naniar::gg_miss_var(skin_mar, show_pct = TRUE, facet = gender)
+```
+
+
+### Aggregation plot
+
+The left column is a bar chart of missingness for each variable while the right column depicts how often each **combination** of missing occurs.
+
+```{r}
+VIM::aggr(skin_mcar, numbers = TRUE, prop = c(TRUE, FALSE))
+VIM::aggr(skin_mar, numbers = TRUE, prop = c(TRUE, FALSE))
+VIM::aggr(skin_mnar, numbers = TRUE, prop = c(TRUE, FALSE))
+```
+
+### Missing data matrix
+For continuous variables, such as age and exposure, the data is presented in box plots. Taking row 2 and column 6 as an example, the distribution of age in patients who have skin data is shown in the blue box plot, and the distribution of age in patients with missing skin data is shown in the grey box plot. For categorical variables, the data is presented as bar plot. 
+```{r}
+# need to change categorical variables from numeric type to factor type
+skin_mar[, c("center", "skin", "gender", "treatment")] <- 
+  lapply(skin_mar[, c("center", "skin", "gender", "treatment")], factor)
+finalfit::missing_pairs(skin_mar, dependent = "treatment", 
+                        explanatory = c("skin", "gender", "exposure", "age", "Y"))
+```
+
+### Descriptive table 
+We can also describe the prevalence of missingness in a table using `missing_compare()`. We show how other variables are associated with the missingness of age in each different missing mechanism
+
+```{r}
+skin_mcar %>% 
+  finalfit::missing_compare(dependent="age", 
+                            explanatory=c("skin","gender","exposure","treatment","Y")) %>%
+  knitr::kable(row.names=FALSE, align = c("l", "l", "r", "r", "r"))
+
+skin_mar %>% 
+  finalfit::missing_compare(dependent="age", 
+                            explanatory=c("skin","gender","exposure","treatment","Y")) %>% 
+  knitr::kable(row.names=FALSE, align = c("l", "l", "r", "r", "r")) 
+
+skin_mnar %>% 
+  finalfit::missing_compare(dependent="age", 
+                            explanatory=c("skin","gender","exposure","treatment","Y")) %>%
+  knitr::kable(row.names=FALSE, align = c("l", "l", "r", "r", "r"))
+```
+
+<br><br>
+
+<div class = "green">
+<a>**Observations** </a> <br>
+
+* Note that none of these visualization tools were helpful in distinguishing the missing data mechanism (especially between MAR and MNAR)
+* For MNAR, missingness relies on some unknown variables or the missing values themselves and we need subject-matter expertise
+
+</div>
+
+## Implications of performing complete-case analysis with missing data 
+
++ The model of interest is a log-linear model for counts
+$$
+\log (E(Y)) = \beta_0 + \beta_1\text{treatment} + \beta_2\text{age} + \beta_3\text{gender} + \beta_4\text{exposure} + \beta_5\text{skin}
+$$
+where $Y$ is the number of new skin cancers in the first year of treatment. 
+
++ Note that we are ignoring some assumptions about the model:
+  - Zero inflation
+  - Overdispersion 
+  - These are topics for another workshop!
+
+
+```{r}
+# we convert variables from numeric type to factor type before running the regression
+skinbl[, c("center", "skin", "gender", "treatment")] <- 
+  lapply(skinbl[, c("center", "skin", "gender", "treatment")], factor)
+skin_mcar[, c("center", "skin", "gender", "treatment")] <- 
+  lapply(skin_mcar[, c("center", "skin", "gender", "treatment")], factor)
+skin_mnar[, c("center", "skin", "gender", "treatment")] <- 
+  lapply(skin_mnar[, c("center", "skin", "gender", "treatment")], factor)
+```
+
+```{r, results = 'asis'}
+fullmod <- glm(Y ~ treatment + age + gender + exposure + skin, 
+               family = poisson("log"), data = skinbl)
+mcarmod <- glm(Y ~ treatment + age + gender + exposure + skin, 
+               family = poisson("log"), data = skin_mcar)
+marmod <- glm(Y ~ treatment + age + gender + exposure + skin, 
+              family = poisson("log"), data = skin_mar)
+mnarmod <- glm(Y ~ treatment + age + gender + exposure + skin, 
+               family = poisson("log"), data = skin_mnar)
+
+export_summs(fullmod, mcarmod, marmod, mnarmod, scale = FALSE, 
+             model.names = c("Full", "MCAR", "MAR", "MNAR"), statistics = c(N = "nobs"))
+
+```
+<div class = "green">
+<a>**Observations** </a> <br>
+
+* Coefficient estimates from MCAR are close to Full, but the standard error estimates are larger
+* Coefficient estimates from MAR and MNAR are quite different and the standard estimates are larger compared to Full
+* Coefficient estimate of `treatment` is much larger in MNAR even though `treatment` was not related to missingness of `age` or `skin` 
+
+</div>
+

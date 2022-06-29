@@ -1,0 +1,484 @@
+---
+title: "Handling Missing Data in Health Science Research"
+author: "Day 1 - Part II"
+date: '2022-06-21'
+output:
+  html_document:
+    default
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+urlcolor: blue
+---
+
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 5px; padding: 20px;}
+div.yellow { background-color:#fffde6; border-radius: 5px; padding: 20px;}
+div.green { background-color:#e6fff0; border-radius: 5px; padding: 20px;}
+div.orange { background-color:#ffede6; border-radius: 5px; padding: 20px;}
+div.purple { background-color:#f5e6ff; border-radius: 5px; padding: 20px;}
+div.aqua { background-color:#e6fdff; border-radius: 5px; padding: 20px;}
+</style>
+
+
+```{r setup, include=FALSE}
+library(here)
+library(tidyverse)
+library(tinytex)
+#library(PupillometryR)
+#library(emo)
+library(knitr)
+library(kableExtra)
+library(nlme)
+#library(car)
+#library(contrast)
+#library(AICcmodavg)
+#library(foreign)
+library(geepack)
+library(gee)
+library(MASS)
+library(lme4)
+library(glmm)
+library(mice)
+library(texreg)
+knitr::opts_knit$set(root.dir = here("dataset"))
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+theme_set(theme_bw(base_size = 15)) # Use black/white theme and increase font size for all ggplot figures
+```
+
+# Missing data methods for cross-sectional data
+
+- Complete-case analysis (list-wise deletion)
+  + Wasteful
+  + Parameter estimates might be unbiased depending on the missing data mechanism
+  + Produces standard errors that are too large
+- Single value imputation
+  + Mean imputation
+  + Regression imputation 
+  + These produce standard errors that are too small
+- [Many R packages are available](https://cran.r-project.org/web/views/MissingData.html)
+
+
+# Multiple imputation 
+
+- Multiple imputation (MI) is a simulation-based method for filling in missing values using observed data 
+- Typical MI approach involves 3 basic steps
+  1. Imputation
+  2. Model fitting
+  3. Summarize estimates using Rubin’s Rules ([Rubin, 1987](http://dx.doi.org/10.1002/9780470316696)) 
+- MI is valid when data is MCAR/MAR
+- MI requires the correct specification of the **imputation model**
+
+```{r, echo=FALSE, out.width = '60%', fig.align="center"}
+knitr::include_graphics(here("notes", "image", "MIfigure.png"), error = FALSE)
+```
+
+
+## Prior to MI
+
+* Decide on the **analysis model** based on the scientific question of interest 
+  + At this step, it is important to identify confounders, interaction terms, quadratic terms, etc. that will be included in the model
+  + More on how to impute interaction terms later
+* Identify the variables to include in the **imputation model**
+  + The imputation model should contain any variables that will be in the analysis model, plus auxiliary variables 
+  + The imputation model is typically more general than the analysis model 
+
+  
+## Imputation step
+
+<!-- * We will focus on **multiple imputation by chained equation** or **MICE** -->
+<!--   + Also referred to as MI by **fully conditional specification** or **FCS** -->
+<!-- * Data needs to be in **wide** format -->
+* Choose $m$ (number of imputations)
+* Select the imputation method
+  + **Joint modeling (JM)** (We will cover R packages amelia and jomo)
+  + **Fully conditional specification (FCS)** (We will cover the R package mice)
+* Perform imputation
+* This will result in $m$ full data sets in wide format
+  + Each data set will be slightly different from each other
+
+
+## Modeling step
+
+* Analyze each of $m$ data with the same model
+* This will result in $m$ different parameter estimates and variance estimates
+  + $\hat\beta^{(k)}$ and $\widehat{\text{Cov}}(\hat \beta^{(k)})$ for $k = 1,...,m$
+
+
+## Pooling step
+
+* Now we combine all $m$ estimates to arrive at a single $\hat\beta$ and $\widehat{\text{Cov}}(\hat \beta)$ using **Rubin's rules**
+* $\hat\beta$ is just the average of all $\hat\beta^{(k)}$ for $k = 1,...,m$
+$$
+\hat \beta = \bar \beta = \frac{1}{m}\sum_{k=1}^{m}\hat \beta^{(k)}
+$$
+
+* The estimated covariance for $\hat \beta$ is given by combining two sources of variability:
+  + **Within-imputation** variability ($W$)
+  + **Between-imputation** variability ($B$)
+$$
+\widehat{\text{Cov}}(\hat \beta) = W + (1+m^{-1})B,
+$$
+where
+$$
+W = \frac{1}{m}\sum_{k=1}^{m}\widehat{\text{Cov}}(\hat \beta^{(k)})
+$$
+and
+$$
+B = \frac{1}{m-1}\sum_{k=1}^{m}\left(\hat \beta^{(k)}-\bar \beta\right)\left(\hat \beta^{(k)}-\bar \beta\right)^{T}.
+$$
+
+
+
+## Joint modeling (JM)
+- Specify a joint model for the entire data set, usually under multivariate normal (MVN)
+- Derive the posterior predictive distribution i.e. distribution of unobserved values conditional on observed data
+
+## Fully conditional specification (FCS)
+- Designed to handle variables of mixed type (continuous, categorical, count, etc.)
+- Specify a conditional model for each missing variable
+- Impute data on a variable-by-variable basis
+
+[van Buuren (2007)](https://doi.org/10.1177/0962280206074463) compares the two methods in greater detail
+
+
+* We will use three different packages in R (Amelia, jomo, and mice) to illustrate how to perform MI on `skin_mar` data set
+```{r}
+skin_mar <- read.table("skinb_MAR.txt", header = TRUE)
+## you'll need to convert your categorical variables into factor in R; otherwise there will be warnings
+skin_mar[, c("center","skin","gender","treatment")] <- 
+  lapply(skin_mar[, c("center","skin","gender","treatment")], factor)
+head(skin_mar)
+```
+
+
+
+## JM in R
+
+### Amelia package
+
+* Amelia is an R package that was developed by Gary King, James Honaker, Anne Joseph, and Kenneth Scheve in 2001
+* A newer version with GUI was released in 2011 (https://gking.harvard.edu/files/gking/files/amelia_jss.pdf)
+* Amelia assumes that your data is jointly distributed as multivariate normal (JM)
+* The imputation algorithm is based on Expectation-maximization with bootstraping (EMB)
+* Vignettes
+  + https://cran.r-project.org/web/packages/Amelia/vignettes/intro-mi.html
+  + https://cran.r-project.org/web/packages/Amelia/vignettes/using-amelia.html
+ 
+<div class = "green">
+**A note about imputing categorical variables using JM** <br>
+
+In JM, all variables in the data including the missing values are assumed to follow a multivariate normal distribution. Therefore, when missing categorical variables are imputed, the imputed values may contain non-integers.
+
+<a>**Ordinal variables** </a> <br>
+
+If the ordinal variable (including binary variable) that contains missing values is a predictor and if you intend to include the variable in the model as a continuous variable, then no extra step is required. We can learn more about the underlying distribution of the data if we leave the imputed values as non-integers rather than forcing them to be integers. Therefore whenever the analysis model permits, the imputed ordinal predictors should be allowed to take on continuous values. In particular, [Horton (2003)](https://www.tandfonline.com/doi/abs/10.1198/0003130032314) recommends **not to** round the imputed binary variables at 0.5! 
+
+<a>**Nominal variables** </a> <br>
+
+Nominal variables don't have inherent orders in their categories so non-integer imputed values are not meaningful. In Amelia, nominal variables of $p$ categories can be listed in the `nom =` option. Then, the function will automatically $p-1$ dummy variables and each of them will be imputed under the multivariate normal distribution with the rest of the data. The imputed values will be appropriately scaled into probabilities for each of the $p$ possible categories, and one of the categories will be drawn. The function will reconstruct the original $p$-category multinomial variable and return it to the user. Note we need at least one non-missing observation from each of the $p$ categories.    
+
+
+</div> 
+
+<br>
+
+```{r}
+library(Amelia)
+library(mitml) # required for `amelia2mitml.list()` and `testEstimates()`
+
+set.seed(100) ## set seed to ensure reporducibility
+
+start.time <- Sys.time()
+# a vector of numbers or names indicating columns in the data that are nominal variables
+amelia.out <- amelia(skin_mar, m=5, noms = c("center", "gender", "treatment", "skin"),
+                     idVars = "ID")
+end.time <- Sys.time()
+end.time - start.time
+
+# look at the observed and imputed values density for one variable
+compare.density(amelia.out, var="age")
+
+# save imputation output as a list and fit glm on each imputed data
+implist.amelia <- amelia2mitml.list(amelia.out)
+fit.amelia <- with(implist.amelia, glm(Y ~ age + treatment + gender + exposure + skin, 
+                                       family = poisson("log")))
+
+# apply rubin's rule using testEstimates() from mitml
+testEstimates(fit.amelia)
+```
+
+* RIV: relative increase in variance due to nonresponse
+* FMI: fraction of missing information
+* More information about these definitions can be found here: https://bookdown.org/mwheymans/bookmi/measures-of-missing-data-information.html
+
+### Jomo package
+
+* The R package Jomo was developed by Matteo Quartagno, Simon Grund, and James Carpenter in 2019
+  + https://journal.r-project.org/archive/2019/RJ-2019-028/RJ-2019-028.pdf
+* Jomo is based on JM imputation for clustered/multilevel data, but can be used for cross-sectional data as well
+* Jomo handles binary and categorical data through **latent normal variables**
+
+```{r}
+library(jomo)
+library(mitools)
+
+# separate data into 
+# Y: variables that are missing
+# X: variables that are complete
+
+Y.jomo <- skin_mar[,c("age", "skin")]
+X.jomo <- skin_mar[,c("center", "gender", "exposure", "treatment", "Y")]
+
+# specify a column of 1 if we want an intercept
+X.jomo$cons <- 1
+
+head(Y.jomo)
+head(X.jomo)
+
+set.seed(100) # set seed for reproducibility
+
+start.time <- Sys.time()
+jomo.out <-jomo(Y = Y.jomo, X = X.jomo, nburn = 1000, nbetween = 1000, nimp = 5)
+end.time <- Sys.time()
+end.time - start.time
+
+# look at the imputed dataset
+head(jomo.out[which(jomo.out$Imputation == 1),])
+
+# get separate imputed dataset manually using imputationList() from mitools
+imp.list.jomo <- imputationList(split(jomo.out, jomo.out$Imputation)[-1])
+fit.jomo <- with(imp.list.jomo, glm(Y ~ age + treatment + gender + exposure + skin, 
+                                    family = poisson("log")))
+
+testEstimates(fit.jomo)
+```
+
+
+
+## FCS in R
+
+Fully conditional specification (FCS) was proposed as a tool for handling a mixture of missing continuous and categorical variables. In particular, [van Buuren](https://stefvanbuuren.name/fimd/) proposed to impute each missing variable using an appropriate model conditional on other observed variables. For example, binary variables can be imputed based on a logistic regression model. 
+
+### Mice package
+
+* Mice stands for "Multiple Imputation by Chained Equations" and the package was developed by Stef van Buuren (https://www.jstatsoft.org/article/view/v045i03)
+* Mice imputes missing values with plausible values
+* These plausible values are drawn from a distribution specifically designed for each missing variable
+
+
+```{r}
+library(mice)
+
+set.seed(100) # set seed for reproducibility
+
+# norm for continuous data, logreg for binary data
+start.time <- Sys.time()
+mice.out <- mice(skin_mar[,-1], seed = 1, m = 5, 
+                 method=c("", "norm", "logreg" ,"", "", "", ""))
+end.time <- Sys.time()
+end.time - start.time
+
+# extract complete data from mice output
+complete.data <- complete(mice.out, "all")
+
+# check the first imputed dataset
+head(complete.data$`1`)
+
+fit.mice <- with(mice.out, glm(Y ~ age + treatment + gender + exposure + skin, 
+                               family = poisson("log")))
+
+# the pool() function from mice could also calculate the pooled result
+pool(fit.mice)
+
+# or use testEstimates() from mitml
+testEstimates(as.mitml.result(fit.mice))
+```
+
+Methods available in mice:
+```{r}
+methods(mice)
+```
+
+## Imputing interaction variables using FCS
+
+Now suppose our analysis model includes an interaction effect between two of the predictors, and one or two of the predictors contain missing values. Because the imputation model should be congenial to the analysis model, we need to include the interaction term in the imputation model as well. 
+
+<div class = "green">
+<a>**Impute then transform**</a> <br>
+
+- Only include main effects and other variables in the imputation model
+- Create the interaction variable after the imputation step
+- Not generally recommended
+
+
+<a>**Transform then impute**</a> <br>
+
++ **Active imputation**
+
+- Includes the interaction variable in the imputation model with all other variables along with the main effects
+- Assumes the interaction variable to be another independent variable 
+- Also referred to as "Just Another Variable" (JAV)
+- The relationship between the interaction effect and the main effects are not necessarily internally consistent
+
++ **Passive imputation** <br>
+
+- Passively imputes the interaction variable
+- The interaction variable is used to impute other missing values but not the main effects that are used to create the interaction effect
+- The relationship between the interaction effect and the main effects is preserved
+
++ **Improved passive imputation** <br>
+
+- In addition to passive imputation, it includes the interaction of a main effect and the outcome as one of the predictors of the other main effect in the imputation model
+- Intuition behind why this approach may reduce bias compared to the conventional passive imputation is that if there were a true interaction between two main effects in the scientific model, the relationship between one of the main effects and the outcome would vary with the other main effect
+- This approach has been shown to produce the least biased estimates in many studies
+</div> 
+
+```{r, echo=FALSE, out.width = '100%', fig.align="center", fig.cap = "Mitani et al. (2015)"}
+knitr::include_graphics(here("notes", "image", "table_imputeint.png"), error = FALSE)
+```
+
+
++ Our new analysis model includes an interaction effect between `treatment` and `skin`
+$$
+\log E(Y) = \beta_0 + \beta_1\text{treatment} + \beta_2\text{age} + \beta_3\text{gender} + \beta_4\text{exposure} + \beta_5\text{skin} + \beta_6\text{treatment} \times \text{skin}
+$$
++ `skin` is missing in $\approx$ 20% of the individuals
++ Using the mice package, we will apply active, passive, and improved passive imputation approaches
+
+
+
+
+<!-- + Options for JM and FCS -->
+<!--   - Impute then transform -->
+<!--   - Transform then impute -->
+<!--   - Active imputation -->
+<!--   - Transform, impute, then transform again -->
+<!-- + Additional options for FCS -->
+<!--   - Passive imputation -->
+<!--   - Improved passive imputation -->
+
+
+
+### Active imputation
+```{r}
+# generate the interaction term
+skin_mar$int <- as.numeric(as.character(skin_mar$treatment)) * as.numeric(as.character(skin_mar$skin))
+head(skin_mar)
+
+### MICE Active
+
+# select the variables to include in the imputation model
+toimp <- skin_mar[c("center", "age", "skin", "gender", "exposure", "treatment", "Y", "int")]
+
+set.seed(100) # set seed for reproducibility
+
+# impute using fcs 
+# since the interaction term is also binary, we will use logistic regression to predict it
+active.out <- mice(toimp, m = 5, method = c("", "norm", "logreg", "", "", "", "", "logreg"), 
+                   print=FALSE)
+
+# build analysis model 
+fit.active <- with(data = active.out, glm(Y ~ age + treatment + gender + exposure + skin + int, 
+                                          family = poisson("log")))
+
+# summarize results
+testEstimates(as.mitml.result(fit.active))
+```
+
+
+
+### Passive imputation
+
+```{r}
+###  MICE Passive
+
+# Dry run to get meth and pred
+ini <- mice(toimp, max = 0, print = FALSE)
+
+# Save the methods and specify to passively impute the interactions
+ini$method
+meth <- ini$method
+meth["age"] <- "norm"
+meth["skin"] <- "logreg"
+meth["int"] <- "~I(treatment*skin)"
+meth
+
+# Remove interactions from predicting main effects
+ini$predictorMatrix
+pred <- ini$predictorMatrix
+pred["skin", "int"] <- 0
+pred[c("skin", "age", "int"),]
+
+set.seed(100) # set seed for reproducibility
+
+# Impute using fcs
+passive.out <- mice(toimp, m = 5, method = meth, pred = pred, print = FALSE)
+
+# build analysis model 
+fit.passive <- with(data = passive.out, glm(Y ~ age + treatment + gender + exposure + skin + int, family = poisson("log")))
+
+# summarize results
+testEstimates(as.mitml.result(fit.passive))
+```
+
+
+### Improved passive imputation
+
+```{r}
+###  MICE Improved Passive
+
+# generate the interaction term between the outcome and each of the main effects
+skin_mar$intYtrt <- skin_mar$Y * skin_mar$treatment
+skin_mar$intYskin <- skin_mar$Y * skin_mar$skin
+head(skin_mar)
+
+# select the variables to include in the imputation model
+toimp <- skin_mar[c("center", "age", "skin", "gender", "exposure", "treatment", "Y", "int", "intYtrt", "intYskin")]
+
+# Dry run to get meth and pred
+ini <- mice(toimp, max = 0, print = FALSE)
+
+# Save the methods and specify to passively impute the interactions
+ini$method
+meth <- ini$method
+meth["age"] <- "norm"
+meth["skin"] <- "logreg"
+meth["int"] <- "~I(treatment*skin)"
+meth["intYskin"] <- "~I(Y*skin)"
+meth
+
+# Remove interactions from predicting main effects
+ini$predictorMatrix
+pred <- ini$predictorMatrix
+pred[c("skin"), "int"] <- 0
+pred[c("skin"), "intYskin"] <- 0
+pred["age", c("intYtrt", "intYskin")] <- 0
+pred[c("skin", "age", "int", "intYtrt", "intYskin"),]
+
+set.seed(100) # set seed for reproducibility
+
+# Impute using fcs
+imp.passive.out <- mice(toimp, m = 5, method = meth, pred = pred, print = FALSE)
+  
+# build analysis model 
+fit.imp.passive <- with(data = imp.passive.out, glm(Y ~ age + treatment + gender + exposure + skin + int, family = poisson("log")))
+
+# summarize results
+testEstimates(as.mitml.result(fit.imp.passive))
+```
+
+# Conclusion on MI
+
++ Although many packages exist to perform MI, the user is still responsible for navigating through various choices
++ Challenges are
+  - selecting the imputation method (JM vs FCS)
+  - choosing a package 
+  - building the imputation model (choosing which variables to include, how to impute each variable for FCS)
+  - selecting the number of imputations
+  - dealing with variables of mixed type, especially nominal categorical variables such as race
+  - dealing with derived variables (higher order terms, interaction terms, etc.)
++ Sensitivity analysis is important
++ Involve a statistician with expertise in missing data
+
